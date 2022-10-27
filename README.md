@@ -1,12 +1,12 @@
-# Project Title
+# PSII Photoinactivation and Repair Fitting
 
 ## Summary
 
-Provide a brief description of the project - 150 words.
+Fitting PSII functional data vs. time to extract PSII photoinactivation and repair rates.
 
 ## Highly Qualified Personnel
 
-- Name, Institution, email, ORCID 0000-0000-0000-0000
+- Mireille Savoie, Mount Allison, msavoie@mta.ca, ORCID 0000-0000-0000-0000
 
 ## Principle Investigators
 
@@ -18,22 +18,22 @@ Provide a brief description of the project - 150 words.
 
 ## Data sources
 
-- Provide links to any data used from external providers .
+- https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0244252#sec019
 
 ## Funding sources
 
-- List your funding sources, grant names, and grant numbers as applicable.
+- Canada Research Chair in Phytoplankton Ecophysiology
 
 ## Keywords
 
-List keywords separated by commas
+Photosystem II, Phytoplankton, Photoinactivation, Protein Turnover, Photoinhibition, Photosynthesis, Electron Transport
 
 ## Additional information and support
 
 - Sensitive Data Flag - Human Participants:  NO
-- Sensitive Data Flag - Indigenous Partnerships: YES or NO
-- Sensitive Data Flag - Government Partnerships: YES or NO
-- Sensitive Data Flag - Industry Partnerships: YES or NO
+- Sensitive Data Flag - Indigenous Partnerships:  NO
+- Sensitive Data Flag - Government Partnerships:  NO
+- Sensitive Data Flag - Industry Partnerships: NO
 - Access Restrictions
 
 ## Software  
