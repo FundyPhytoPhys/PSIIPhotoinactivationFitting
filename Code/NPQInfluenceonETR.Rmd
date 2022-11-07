@@ -1,0 +1,1236 @@
+---
+title: "NPQ Influence on ETR"
+author: "Nerissa Fisher, Douglas A. Campbell"
+date: "`r format(Sys.Date())`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+## Introduction
+Data from Nerissa Fisher, UTS Australia
+
+
+
+## Libraries (or 'packages') contain additions to base R.
+```{r load libraries}
+library(tidyverse)
+  #tidyverse set of packages for data wrangling and plotting; includes ggplot2
+library(lubridate)
+  #assists with date formats
+library(minpack.lm)
+library(broom)
+library(kableExtra)
+library(ggpubr)
+```
+
+## Project Variables
+Assign project-specific values to variables used in in subsequent code chunks.
+```{r set project variables}
+Project <- "PSIICurveFits"
+DataIn <- file.path("DataIn")
+Plots <- file.path("Plots")
+ProcessData <- file.path("ProcessData")
+
+TreatmentPAR_ue <- 1200
+Photons_umol <- 6.022E17
+A2_m2 <- 1E20
+```
+
+Generate a set of colours to use in later ggplot to code for 0/1 Lincomycin inhibitor
+```{r set colours}
+my_inhibitor = c(0, 1)
+my_colours = c("darkgreen","red")
+
+names(my_colours) <- my_inhibitor
+```
+
+
+## Import a tidied data object previously stored as .Rds object  
+We could alternatively import from a .csv object
+```{r read Rds}
+TidyData <- readRDS(file = file.path(ProcessData, "DataTidyTutorialTidyData.Rds", fsep =.Platform$file.sep))
+
+colnames(TidyData)
+```
+
+## Arrange Data
+
+Generally avoid removing data columns, but...
+```{r remove columns}
+# TidyData <- TidyData %>%
+#   select(-c("LEDa�C", "LEDb�C", "LEDc�C"))
+```
+
+Filter rows where FvFmFqFm = NA
+```{r}
+TidyData <- TidyData %>%
+  filter(!is.na(FvFmFqFm))
+```
+
+### Estimating PSIIopen (1-C) and PSIIETR using only Tau, Sigma & Photons_m2_s
+
+A single FRRf induction/relaxation sequence can support estimation of:
+PSIIopen -> PSIIclosed
+SigmaPSII_m2 * Photons_m2_s 
+
+PSIIclosed -> PSIIopen
+1/Tau_s
+
+At (pseudo) Steady State:
+[PSIIopen] * {SigmaPSII_m2 * Photons_m2_s} = [PSIIclosed] * {1/Tau_s}
+
+[PSIIopen] * {SigmaPSII_m2 * photons_m2_s} = [1-PSIIopen] * {1/Tau_s}
+
+PSIIclosed/PSIIopen
+
+{SigmaPSII_m2 * Photons_m2_s } = [1-PSIIopen/[PSIIopen]] * 1/Tau_s
+
+
+[1-PSIIopen]/[PSIIopen] = {SigmaPSII_m2 * Photons_m2_s } * Tau_s
+
+
+1/PSIIopen - 1 = {SigmaPSII_m2 * Photons_m2_s} * Tau_s
+1/PSIIopen = 1 + {SigmaPSII_m2 * Photons_m2_s}  * Tau_s
+
+PSIIopen/1 = 1/{1 + (SigmaPSII_m2 * Photons_m2_s * Tau_s)}
+
+PSIIETR = PSIIopen * SigmaPSII_m2 * Photons_m2_s
+
+JVPSII = PSIIETR * nPSII
+
+nPSII ~ Fo/SigmaPSII (or other...)
+
+The estimates are sensitive to the choice of Tau_s.
+The Chelsea FRRf fits a single initial Tau_s without multiple phase exponential decay fitting to deconvolute multiple Tau_s.
+```{r add single line data transform variables}
+TidyData <- TidyData %>%
+  mutate(TimeHMS = seconds_to_period(Time)) %>%
+  unite(col = DateTime, Date, TimeHMS, remove = FALSE) %>%
+  mutate(DateTime = ymd_hms(DateTime)) %>% 
+  mutate(Treatment_s = (Treatmentmin * 60),
+         Photons_m2_s = (Treatmentue * Photons_umol), 
+         Tau_s = Tau * 1E-6,
+         Sigma_m2 = Sigma * (100/A2_m2),
+         OpenTau = 1/(1 + (Sigma_m2 * Photons_m2_s * Tau_s)),
+         PSIIETRTau = Sigma_m2 * Photons_m2_s  * OpenTau)
+```
+
+
+## Time series for relaxation curve fits and whole time course trajectories
+
+```{r E_sec}
+TidyData <- TidyData %>%
+  group_by(Species, Replicate, Lincomycin, Treatmentmin, Filename) %>%
+  mutate(Relax_sec = (Time - min(Time))) %>%
+  mutate(Timecourse_sec = as.numeric((Treatment_s + Relax_sec))) %>%
+  mutate(Timecourse_min = Timecourse_sec/60) %>%
+  mutate(Timecourse_minMAX = max(Timecourse_min)) %>%
+  ungroup()
+
+TidyData <- TidyData %>%
+  group_by(Species, Replicate, Lincomycin, Filename) %>%
+  mutate(E_sec = as.numeric(DateTime - min(DateTime))) %>%
+  ungroup()
+
+colnames(TidyData)       
+```
+### Estimate of Fomin as minimum & Fmmax as  maximum across time course;
+Possible issue with Fo quenching? Foprime estimator is based upon Fo at most quenched level, but Fm at most relaxed level.
+
+```{r parameter max min dark}
+#group_by is not working with [] indices within mutate, getting single values for Fmdark, Fodark and FvFmdark instead of 20 values for each
+
+#Fodark = min(TidyData[TidyData$Treatmentmin == 0, "FoF"]),
+
+TidyData <- TidyData %>%
+  group_by(Species, Replicate, Lincomycin, Treatmentmin, Filename) %>% 
+  mutate(Sigmamax_m2 = max(Sigma_m2),
+         Fmmax = max(Fm),
+         Fmmin = min(Fm),
+         Fomin = min(FoF),
+         Fomax = max(FoF)) %>%
+  ungroup()
+         
+ TidyData <- TidyData %>%
+   group_by(Species, Replicate, Lincomycin, Filename) %>%
+   mutate(Sigmadark_m2 = Sigmamax_m2[1],
+         Fmdark = Fmmax[1],
+         Fodark = Fomin[1],
+         FvFmdark = (Fmdark - Fodark)/Fmdark, 
+         #PAM Application Notes (2008) 1: 27 -35
+         YNO = FoF/Fmdark, 
+         YNPQ = FoF/Fm - FoF/Fmdark,
+         Y = YNO + YNPQ + FvFmFqFm,
+         NPQ = (Fmdark - Fm)/Fm,
+         #Oxborough & Baker 1997
+         Foprime = Fodark/(FvFmdark + (Fodark/Fm)),
+         #[1-Q] Q1, [1-C] C1 b/c non-syntatic variable names
+         Q1 = ((Fm - Foprime)/Fm)/FvFmdark,
+         C1 = (Fm - FoF)/(Fm - Foprime),
+         PSIIETRY = Photons_m2_s * Sigmadark_m2 * FvFmdark * FvFmFqFm) %>%
+  ungroup()
+```
+
+### Maximum or Minimum value of FvFmFqFm, Tau, Sigma from each treatment grouping and measurement point
+```{r FvFmmaxmin}
+TidyData <- TidyData %>%
+  group_by(Species, Replicate, Lincomycin, Treatment_s, Treatmentue, Filename) %>%
+  mutate(NPQinduced = (Fmdark - Fmmin)/Fmmin,
+         NPQrelaxed = (Fmdark - Fmmax)/Fmmax,
+         #Think about these; should this only be done on filtered data?
+         YNPQinduced = Fomin/Fmmin - Fomin/Fmdark,
+         YNPQrelaxed = Fomax/Fmmax - Fomax/Fmdark,
+         FvFmmax = max(FvFmFqFm),
+         FvFmmin = min(FvFmFqFm),
+         Sigmamax = max(Sigma),
+         Sigmamin = min(Sigma),
+         PSIIETRYinduced = min(PSIIETRY),
+         PSIIETRYrelaxed = max(PSIIETRY),
+         Taumax = max(Tau),
+         Taumin = min(Tau),
+         AmpFvFmRelax = FvFmmax - FvFmmin,
+         AmpSigmaRelax = Sigmamax - Sigmamin,
+         AmpTauRelax = Taumax-Taumin) %>%
+  ungroup()
+```
+
+
+## Exploratory Plots
+
+### Exploratory plots of Y, 1-Q (Q1), 1-C, OpenTau, PSIIETRTau, PSIIETRY
+```{r Y plot}
+TidyData %>%
+  filter(Lincomycin == 0) %>%
+  ggplot() +
+  geom_point(aes(x = Timecourse_sec, y = Y) ) +
+  geom_point(aes(x = Timecourse_sec, y = FvFmFqFm), colour = "green") +
+  geom_point(aes(x = Timecourse_sec, y = YNO), colour = "red") +
+   geom_point(aes(x = Timecourse_sec, y = YNPQ), colour = "orange") +
+  geom_vline(xintercept = 120 * 60) +
+  facet_grid(rows = vars(Species)) + 
+  theme_bw()
+
+TidyData %>%
+  filter(Lincomycin == 0) %>%
+  ggplot() +
+  geom_point(aes(x = YNPQ, y = Q1, colour = Species)) +
+  facet_grid(rows = vars(Species)) + 
+  theme_bw()
+
+TidyData %>%
+  filter(Lincomycin == 0) %>%
+  ggplot() +
+  geom_point(aes(x = YNPQinduced, y = YNPQrelaxed, colour = Species)) +
+  facet_grid(rows = vars(Species)) + 
+  theme_bw()
+
+TidyData %>%
+  filter(Lincomycin == 0) %>%
+  ggplot() +
+  geom_point(aes(x = C1, y = OpenTau, colour = Species)) +
+  theme_bw()
+
+TidyData %>%
+  filter(Lincomycin == 0,
+         FvFmFqFm == FvFmmin) %>%
+  ggplot() +
+  geom_point(aes(x = C1, y = OpenTau, colour = Species)) +
+  theme_bw() +  
+  labs(title = Project, subtitle = "Lincomycin (0) Treatment", caption = "OpenTauvsC1 filtered for induced FvFmFqFm == FvFmmin")
+
+
+TidyData %>%
+  filter(Lincomycin == 0,
+         FvFmFqFm == FvFmmax) %>%
+  ggplot() +
+  geom_point(aes(x = C1, y = OpenTau, colour = Species)) +
+  theme_bw() +
+  labs(title = Project, subtitle = "Lincomycin (0) Treatment", caption = "OpenTauvsC1 filtered for relaxed FvFmFqFm == FvFmmax")
+
+
+TidyData %>%
+  filter(Lincomycin == 0,
+         FvFmFqFm == FvFmmax) %>%
+  ggplot() +
+  geom_point(aes(x = PSIIETRY, y = PSIIETRTau, colour = Species)) +
+  geom_smooth(aes(x = PSIIETRY, y = PSIIETRTau, colour = Species), method = "lm") +
+  theme_bw() +
+  labs(title = Project, subtitle = "Lincomycin (0) Treatment", caption = "PSIIETRTau vs. PSIIETRY filtered for relaxed FvFmFqFm == FvFmmax")
+
+```
+
+```{r Y induced plot}
+TidyData %>%
+  group_by(Species, Replicate, Lincomycin, Treatmentmin) %>%
+  filter(FvFmFqFm == min(FvFmFqFm)) %>%
+  filter(Lincomycin == 0) %>%
+  ungroup() %>%
+  ggplot() +
+  geom_point(aes(x = Timecourse_sec, y = Y) ) +
+  geom_point(aes(x = Timecourse_sec, y = FvFmFqFm), colour = "green") +
+  geom_point(aes(x = Timecourse_sec, y = YNO), colour = "red") +
+   geom_point(aes(x = Timecourse_sec, y = YNPQ), colour = "orange") +
+  geom_vline(xintercept = 120 *60) +
+  facet_grid(rows = vars(Species)) + 
+  theme_bw()
+
+```
+
+```{r Y relaxed plot}
+TidyData %>%
+  group_by(Species, Replicate, Lincomycin, Treatmentmin) %>%
+  filter(FvFmFqFm == max(FvFmFqFm)) %>%
+  filter(Lincomycin == 0) %>%
+  ungroup() %>%
+  ggplot() +
+  geom_point(aes(x = Timecourse_sec, y = Y) ) +
+  geom_point(aes(x = Timecourse_sec, y = FvFmFqFm), colour = "green") +
+  geom_point(aes(x = Timecourse_sec, y = YNO), colour = "red") +
+   geom_point(aes(x = Timecourse_sec, y = YNPQ), colour = "orange") +
+  geom_vline(xintercept = 120 *60) +
+  facet_grid(rows = vars(Species)) + 
+  theme_bw()
+```
+
+### Exploratory plot of PSIIETRTau
+```{r PSIIETRTau plot}
+TidyData %>%
+  filter(Lincomycin == 0) %>%
+  ggplot() +
+  geom_point(aes(x = Timecourse_sec, y = PSIIETRTau)) +
+  geom_vline(xintercept = 120 * 60) +
+  facet_grid(rows = vars(Species), cols = vars(Lincomycin)) + 
+  theme_bw()
+
+```
+
+### Exploratory plot of FvFmmax vs. Treatmentmin
+Plot "FvFmmax" vs. "Treatmentmin" facetted by "Lincomycin" and "Species" with Filename as colour and Treatment uE as shape.
+```{r FvFmTreatmentminLincoSpeciesPlot}
+#Treatmentue is a numeric variable, we use as.factor(Treatmentue) to convert it to discrete factor levels
+TidyData %>%
+  ggplot() +
+  geom_point(aes(x = Treatmentmin, y = FvFmmax, colour = as.factor(Replicate), shape = as.factor(Treatmentue)), size = 3) +
+  geom_line(aes(x = Treatmentmin, y = FvFmmax, colour = as.factor(Replicate))) +
+  facet_grid(rows = vars(Species), cols = vars(Lincomycin)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species by row; Treatmentue by colour") +
+  theme_bw()
+```
+Lincomycin = 0; initial decay to a plateau in all species. Subsequent recovery to ~original values when Treatmentue drops from 1200 (triangles) back to 15 ue (circles).
+
+Lincomycin = 1; exponential(?) decay to low levels; little recovery upon shift from 1200 down to 15 ue.
+
+Some scatter among replicates within treatment x species combinations.
+
+### Exploratory plot of FvFmmax & FvFmminvs. Treatmentmin
+Plot "FvFmmax" vs. "Treatmentmin" facetted by "Lincomycin" and "Species" with Filename as colour and Treatment uE as shape.
+```{r FvFmmaxminTreatmentminLincoSpeciesPlot}
+TidyData %>%
+  ggplot() +
+  geom_line(aes(x = Treatmentmin, y = FvFmmax, colour = as.factor(Replicate))) +
+   geom_line(aes(x = Treatmentmin, y = FvFmmin, colour = as.factor(Replicate)),linetype = "dashed") +
+  facet_grid(rows = vars(Species), cols = vars(Lincomycin)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species by row; Treatmentue by colour") +
+  theme_bw()
+
+```
+
+### Exploratory plot of FvFmmax & FvFmmin vs. Timecourse_sec
+Plot "FvFmmax" vs. "Timecourse_sec" facetted by "Lincomycin" and "Species" with Filename as colour and Treatment uE as shape.
+```{r FvFmmaxminTimecourse_secLincoSpeciesPlot}
+#Need to Fix group_by() for calculation of Timecourse_sec b/c some filenames contain 2 replicates of the same species and there is no unambiguous coding for replicate
+#Treatmentue is a numeric variable, we use as.factor(Treatmentue) to convert it to discrete factor levels
+TidyData %>%
+  ggplot() +
+  geom_point(aes(x = Timecourse_sec, y = FvFmmax, colour = as.factor(Replicate))) +
+   geom_point(aes(x = Timecourse_sec, y = FvFmmin, colour = as.factor(Replicate))) +
+  facet_grid(rows = vars(Species), cols = vars(Lincomycin)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species x Replicate by row") +
+  theme_bw()
+
+```
+### Exploratory plot of FvFmmax & FvFmmin vs. Timecourse_sec with Relaxation Branches
+Plot "FvFmmax" vs. "Timecourse_sec" facetted by "Lincomycin" and "Species" with Filename as colour and Treatment uE as shape.
+```{r FvFmmaxminTimecourse_secLincoSpeciesRelaxExploe}
+TidyData %>%
+  filter(Replicate == 3) %>%
+  filter(Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = FvFmmax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = FvFmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FvFmFqFm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  facet_grid(rows = vars(Species)) + 
+  labs(subtitle = "No Lincomycin Treatment", caption = "Species by row") +
+  theme_bw()
+
+TidyData %>%
+  filter(Replicate == 3) %>%
+  filter(Species %in% c("Tp", "Tw")) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = FvFmmax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = FvFmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FvFmFqFm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  facet_grid(rows = vars(Species), cols = vars(Lincomycin)) + 
+  labs(caption = "Species by row") +
+  theme_bw()
+```
+
+### Exploratory plot of Sigmammax & sigmammin vs. Timecourse_sec with Relaxation Branches
+Plot "Sigmamax" vs. "Timecourse_sec" facetted by "Lincomycin" and "Species" with Filename as colour and Treatment uE as shape.
+```{r SigmammaxminTimecourse_secLincoSpeciesRelaxPlot}
+TidyData %>%
+  filter(Replicate == 3) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_sec, y = Sigmamax)) +
+   geom_line(aes(x = Timecourse_sec, y = Sigmamin),linetype = "dashed") +
+  geom_point(aes(x = Timecourse_sec, y = Sigma), size = 0.5) +
+  facet_grid(rows = vars(Species, Replicate), cols = vars(Lincomycin)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species x Replicate by row") +
+  theme_bw()
+
+```
+
+### Exploratory plot of Taummax & Taummin vs. Timecourse_sec with Relaxation Branches
+Plot "Taumax" vs. "Timecourse_sec" facetted by "Lincomycin" and "Species" with Filename as colour and Treatment uE as shape.
+```{r TaummaxminTimecourse_secLincoSpeciesRelaxPlot}
+#Need to Fix group_by() for calculation of Timecourse_sec b/c some filenames contain 2 replicates of the same species and there is no unambiguous coding for replicate
+#Treatmentue is a numeric variable, we use as.factor(Treatmentue) to convert it to discrete factor levels
+TidyData %>%
+  filter(Replicate == 3) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_sec, y = Taumax)) +
+   geom_line(aes(x = Timecourse_sec, y = Taumin),linetype = "dashed") +
+  geom_point(aes(x = Timecourse_sec, y = Tau), size = 0.5) +
+  facet_grid(rows = vars(Species, Replicate), cols = vars(Lincomycin)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species x Replicate by row") +
+  theme_bw()
+
+```
+
+## Set up Models
+
+### Generate functions for model equations
+```{r exp_eqn}
+#create function for Exponential decay of PSII function
+exp_eqn <- function(x, Kpi, Intercept){(Intercept*exp(x*-Kpi))
+}
+
+#set starting estimates for fit parameters
+#0.7 is a theoretical ~ maximum for the FvFm metric
+ExpEqnStart <- list(Kpi = 0.0005, Intercept = 0.7)
+```
+
+
+```{r exp_rise_eqn}
+#create function for Exponential relaxation of PSII function down regulation by NPQ
+exp_rise_eqn <- function(x, Krise, Intercept, Max){Max - ((Max-Intercept)*exp(x*-Krise))
+}
+
+#set starting estimates for fit parameters
+#0.7 is a theoretical ~ maximum for the FvFm metric
+ExpRiseEqnStart <- list(Krise = 0.0005, Intercept = 0.3, Max = 0.7)
+```
+
+
+
+```{r mm_eqn}
+#create function for MichaelisMenten relaxation of inhibition of PSII function by NPQ
+mm_eqn <- function(x, Km, Max){(x * Max)/(Km + x)
+}
+
+#set starting estimates for fit parameters
+#0.7 is a theoretical ~ maximum for the FvFm metric
+MMEqnStart <- list(Km = 500, Max = 0.7)
+```
+
+
+
+## "Nest" the data set for eqn fitting
+Use each combination of Species x Lincomycin x Treatmentue; remaining variables will be 'nested' into a data frame for each row of the new DataNest.
+This generates a 'nested dataframe' with only 12 rows:  
+3 Species (To", "Tp", "Tm") x 2 Lincomycin (0,1) x 2 Treatmentue (12, 1200).
+But the 'data' column for each row contains a data frame with all the data for each combination
+```{r DataNest}
+#remove "Time" & "TimeHMS" column b/c it causes problems later with unnesting results of KokFixFit
+#filter to only include rows with FvFmmax to simplify fitting
+DataNest <- TidyData %>%
+  select(-c(Time, TimeHMS)) %>%
+  filter(FvFmFqFm == FvFmmax) %>%
+  nest(data = -c(Species, Lincomycin, Treatmentue))
+
+#alternate datanest pooling all three species
+DataNestPool <- TidyData %>%
+  select(-c(Time, TimeHMS)) %>%
+  filter(FvFmFqFm == FvFmmax) %>%
+  nest(data = -c(Lincomycin, Treatmentue))
+```
+
+## Run exponential decay model on nested data set
+Now we can feed a nested dataframe to the "purrr::map" function to fit our "exp_eqn" fit equation each to  the nested data sets where "Lincomycin" = 1 and "Treatmentue = 1200.
+
+'broom::augment', 'broom::tidy', and 'broom::glance' are functions for looking at the results of statistical tests or curve fits in data frame format.
+
+Note the "==" for the 'filter' steps.
+```{r linco map exponential}
+LincoFits <- DataNest %>% 
+  filter(Lincomycin == 1,
+         Treatmentue == 1200) %>%
+  mutate(FitExp = map(data, ~nlsLM(FvFmmax~ exp_eqn(x = Treatment_s, Kpi, Intercept), data = .x, start = ExpEqnStart)),
+    PredictLinco = map(FitExp, augment),
+    TidiedLinco = map(FitExp, tidy),
+    ParamLinco = map(FitExp, glance))
+
+LincoFitsPool <- DataNestPool %>% 
+  filter(Lincomycin == 1,
+         Treatmentue == 1200) %>%
+  mutate(FitExp = map(data, ~nlsLM(FvFmmax~ exp_eqn(x = Treatment_s, Kpi, Intercept), data = .x, start = ExpEqnStart)),
+    PredictLinco = map(FitExp, augment),
+    TidiedLinco = map(FitExp, tidy),
+    ParamLinco = map(FitExp, glance))
+```
+
+The map generates a 'list', LincoFits with outputs of the fit for each of the three species 'nests'.
+Handling dataframes is more familiar than handling lists (at least for Doug).
+
+### Get linco exponential fit terms
+```{r linco fit terms}
+LincoFitCoeff <- LincoFits %>%
+  unnest(col = TidiedLinco, names_repair = "universal") %>%
+  select(-c(data, FitExp, PredictLinco, ParamLinco))
+
+LincoFitCoeffPool <- LincoFitsPool %>%
+  unnest(col = TidiedLinco, names_repair = "universal") %>%
+  select(-c(data, FitExp, PredictLinco, ParamLinco))
+```
+
+### Get predicted values from the exponential decay fits
+```{r}
+#This is brittle b/c of numbered columns changing position as variable columns are added; Do we need to unnest 'data'?
+#Or figure out better way to rename columnes using a pattern match
+LincoPredictFrame <- LincoFits %>%
+  unnest(col = c(data, PredictLinco), names_repair = "universal") %>%
+  select(-c(FitExp, TidiedLinco, ParamLinco)) %>%
+  rename(Treatment_s = `Treatment_s...53`,
+         FvFmax = `FvFmmax...84`) %>%
+  mutate(Timecourse_min = Timecourse_sec/60)
+
+LincoPredictFrame
+
+LincoPredictPoolFrame <- LincoFitsPool %>%
+  unnest(col = c(data, PredictLinco), names_repair = "universal") %>%
+  select(-c(FitExp, TidiedLinco, ParamLinco)) %>%
+  rename(Treatment_s = `Treatment_s...53`,
+         FvFmax = `FvFmmax...84`) %>%
+  mutate(Timecourse_min = Timecourse_sec/60)
+
+LincoPredictPoolFrame
+```
+
+### Plot model of FvFm with and Decay (linco = 1).
+We plot the predicted values from the model fit for each species, with the residuals as the width of a 'ribbon' as a quick indicator of scatter around the predicted values.
+```{r FvFmTimeLincoSpeciesModelPlot}
+#Treatmentue is a numeric variable, we use as.factor(Treatmentue) to convert it to discrete factor levels
+TidyData %>%
+  ggplot() +
+  geom_point(aes(x = Timecourse_sec, y = FvFmmax, colour = as.factor(Treatmentue)), size = 2) +
+  facet_grid(rows = vars(Species), cols = vars(Lincomycin)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species by row; Treatmentue by colour") +
+  theme_bw() 
+  geom_ribbon(data = LincoPredictFrame, aes(x = Treatment_s, ymin = .fitted - .resid, ymax = .fitted + .resid), alpha = 0.5)
+
+```
+
+We see that, as expected, a simple exponential decay reasonably predicts change in "FvFmmax" vs. "Treatment_s",when "Lincomycin" = 1, at least over the initial period of Treatmentue = 1200.
+Note the predicted values only cover Treatmentue = 1200, because we only ran the model over those observations.
+
+We see that when "Lincomycin" = 0, this exponential decay would not be a good predictor of "FvFm", at least after the first ~1800 s, but, we have a model equation that should predict the pattern of the observations when  "Lincomycin" = 0.
+
+***
+## Curve Fitting Background II:
+When protein synthesis is blocked ("Lincomycin" = 1) we see progressive (exponential) inactivation of PhotosystemII ("FvFm") as they are damaged (as a side effect of photosynthesis).
+The fits are somewhat different across the 3 species, as expected.
+
+An established model (Kok, 1956, reviewed in Campbell & Serôdio, 2020) predicts that if protein synthesis is active ("Lincomycin" = 0), cells have repair processes to replace PhotosystemII (tracked by "FvFm").
+
+[PhotosystemII active] -> [PhotosystemIIinactive], with an exponential rate constant, Kpi.  
+[PhotosystemII active] <- [PhotosystemIIinactive], with an exponential rate constant, Krec. 
+
+So, to model"FvFm" we could:  
+-assume that underlying inactivation of PhotosystemII is happening the same as seen in "Lincomycin" = 1; that is, Kpi is independent of Lincomycin, but can be measured directly in "Lincomycin" = 1
+-there is a counteracting repair process that replaces Photosystem II at some rate when "Lincomycin" = 0, described by rate constant Krec
+
+Then, at some point:  
+[PhotosystemII active] * Kpi = [PhotosystemIIinactive] * Krec
+
+The rate of photoinactivation is equal to the counteracting rate of recovery, because the pool of [PhotosystemIIinactive] builds up providing a substrate for the recovery process.  
+This shows up in the plateau in the plot of "FvFm" vs. Treatment_s.
+
+So we formulate this model as the integrated form of a differential equation (with some simplying assumptions).
+Then we can simultaneously fit the parameters, Kpi and Krec, of the equation using the observations from "Lincomycin =O".
+Or, we can Kpi that we already have from the "Lincomycin = 1" data, and feed it in to the equation to fit Krec.
+[PSIIactive]t = [PSIIactive]t0 * (Krec + (Kpi * exp^-((Kpi+Krec)* t))/(Kpi + Krec))
+
+Clear as mud?
+***
+
+### Fit non-linear model to FvFm without Lincomycin
+We have a model equation that we have reason to believe should predict the pattern of the data.
+We provide initial seeding starting estimates for fitted parameters (KokEqnStart)
+
+```{r Kok eqns}
+#create function for Kok model
+kok_eqn <- function(x, Krec, Kpi, Intercept){Intercept*(Krec + (Kpi *exp(-((Kpi + Krec)*x))))/(Kpi + Krec)
+}
+
+#set starting estimates for fit parameters
+#0.7 is a theoretical ~ maximum for the FvFm metric
+KokEqnStart <- list(Krec = 0.0001, Kpi = 0.0005, Intercept = 0.7)
+
+KokEqnLower <- c(0.00001, 0.00005, 0.5)
+KokEqnUpper <- c(0.005, 0.005, 0.8)
+
+
+#create function for Kok model
+koksigmaI_eqn <- function(x, Photons_m2_s, Krec, SigmaI, Intercept){Intercept*(Krec + ((SigmaI*Photons_m2_s) * exp(-(((SigmaI*Photons_m2_s) + Krec)*x))))/((SigmaI*Photons_m2_s) + Krec)
+}
+
+#set starting estimates for fit parameters
+#0.7 is a theoretical ~ maximum for the FvFm metric
+KokSigmaISTart <- list(Krec = 0.0001, SigmaI = 4E-25, Intercept = 0.7)
+
+```
+
+Use purrr::map to apply our kok_eqn to the observations where "Lincomycin = 0", "Treatmentue = 1200", still nested by species
+
+Issue with filtering that generates DataNest; multiple rows for some time points; b/c multiple rows with FvFmFqFm == FvFmmax 
+Adding lower & upper limits to the fit allows it to run; be careful to check the coeff results to make sure they do not hit boundaries.
+```{r  map Kok eqn}
+KokFits <- DataNest %>% 
+    filter(Lincomycin == 0,
+         Treatmentue == 1200) %>%
+  mutate(FitKok = map(data, ~nlsLM(FvFmmax ~ kok_eqn(x = Treatment_s, Krec, Kpi, Intercept), data = .x, start = KokEqnStart, lower = KokEqnLower, upper = KokEqnUpper)),
+    PredictKok = map(FitKok, augment),
+    TidiedKok = map(FitKok, tidy),
+    ParamKok = map(FitKok, glance))
+```
+
+### Get -linco Kok fit terms
+```{r Kok fit}
+KokFitFrame <- KokFits %>%
+  unnest(col = TidiedKok, names_repair = "universal") %>%
+  select(-c(data, FitKok, PredictKok, ParamKok))
+
+KokFitFrame
+```
+
+## Get predicted values from -linco Kok fits
+```{r KokPredict}
+KokPredictFrame <- KokFits %>%
+  unnest(col = PredictKok, names_repair = "universal") %>%
+  select(-c(data, FitKok, TidiedKok, ParamKok))
+
+KokPredictFrame
+```
+
+###  Plot model of FvFm with and without lincomycin.
+We plot the predicted values from the Exponential decay model fit for each species with lincomycin, and the Kok model for each species without lincomycin.
+```{r FvFmTimeLincoKokSpeciesModelPlot}
+#Replicate is a numeric variable, we use as.factor(Replicate) to convert it to discrete factor levels
+TidyData %>%
+  ggplot() +
+  geom_point(aes(x = Timecourse_sec, y = FvFmmax, colour = as.factor(Treatmentue)), size = 3) +
+  facet_grid(rows = vars(Species), cols = vars(Lincomycin)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species by row; Treatmentue by colour") +
+  theme_bw() +
+  geom_ribbon(data = LincoPredictFrame, aes(x = Treatment_s, y = .fitted, ymin = .fitted - .resid, ymax = .fitted + .resid), alpha = 0.5) +
+  geom_ribbon(data = KokPredictFrame, aes(x = Treatment_s, y = .fitted, ymin = .fitted - .resid, ymax = .fitted + .resid), alpha = 0.5)
+
+```
+
+In the model we fit 3 parameters of the Kok model:
+-Kpi (for which we already had an independent estimate from the observations where 'Lincomycin' = 1)
+-Intercept (for which we already had an independent estimate from the observations where 'Lincomycin' = 1 , because the intercepts should be the same before any treatment begins).
+
+-Krec; the rate constant for recovery, which we hypothesize accounts for the difference in observations between 'Lincomycin' = 0 and 'Lincomycin' = 1 observations.
+
+This is valid, but fitting 3 floating parameters with so few data points has low statistical power. And, our Kok model assumes that Kpi & Intercept should be the same as for "Lincomycin" = 1.
+
+## Fit Krec using lincomycin Kpi as fixed input
+We will take the Kpi & Intercept estimates from the 'Lincomycin' = 1 observations, feed them into the Kok model as set values.
+We then ask R to find the values for Krec that best explain the observations from 'Lincomycin' = 0.
+If we had just 1 species, this is easy.
+With 3 species, it is trickier to step through both the set of Kpi & intercept values for each species, and the species nested data.
+
+left_join the LincoKpi & LincoIntercept values from LincoFitCoeff to new FixTidyData.
+Add a new SigmaI_m2 estimate derived from LincoKpi.
+  (Alternately, refit the Linco data vs. cumulative photons to get a direct fit of SigmaI.)
+  
+Generate a "FixDataNest" that only contains the "Lincomycin" = 0 data, but carrying an estimate.Kpi, an estimate.Intercept and a SigmaI_m2 for each row, derived from the "Lincomycin" = 1
+
+
+```{r FixTidyData, warning = FALSE, message = FALSE}
+FixKpi = LincoFitCoeff %>%
+  select(-c(Lincomycin, Treatmentue)) %>%
+  pivot_wider(names_from = term, values_from = c(estimate, std.error, statistic, p.value))
+
+FixKpiPool = LincoFitCoeffPool %>%
+  select(-c(Lincomycin, Treatmentue)) %>%
+  pivot_wider(names_from = term, values_from = c(estimate, std.error, statistic, p.value))
+ 
+ 
+#manually set TreatmentPAR_ue = 1200             
+FixTidyData <- left_join(x = TidyData, y = FixKpi, by = "Species") %>%
+ mutate(SigmaI_m2 = estimate_Kpi/(TreatmentPAR_ue * Photons_umol))
+
+FixDataNest <- FixTidyData  %>% 
+  select(-c(Time, TimeHMS)) %>%
+  filter(Lincomycin == 0,
+         Treatmentue == 1200,
+         FvFmFqFm == FvFmmax) %>%
+  nest(data = -c(Species))
+
+#DataNestCourse of entire timecourse for Lincomycin = 0
+CourseDataNest <- FixTidyData %>%
+  select(-c(Time, TimeHMS)) %>%
+  filter(FvFmFqFm == FvFmmax,
+         Lincomycin == 0) %>%
+  nest(data = -c(Species))
+
+#DataNestRecov of recovery timecourse for Lincomycin = 0
+RecovDataNest <- FixTidyData %>%
+  select(-c(Time, TimeHMS)) %>%
+  filter(FvFmFqFm == FvFmmax,
+         Lincomycin == 0,
+         Treatmentmin >= 120) %>%
+  nest(data = -c(Species))
+```
+
+## Run exponential rise (recovery) model on nested data set as separate Krec estimator
+```{r recovery map exponential}
+RecovLower <- c(1E-5, 0.1, 0.5)
+RecovUpper <- c(1E-3, 0.5, 0.8)
+
+RecovFits <- RecovDataNest %>% 
+  mutate(FitRecov = map(data, ~nlsLM(FvFmmax~ exp_rise_eqn(x = Treatment_s, Krise, Intercept, Max), data = .x, start = ExpRiseEqnStart, lower = RecovLower, upper = RecovUpper)),
+    PredictRecov = map(FitRecov, augment),
+    TidiedRecov = map(FitRecov, tidy),
+    ParamRecov = map(FitRecov, glance))
+```
+
+### Get recovery rise fit terms & predicted values
+```{r recovery fit terms}
+RecovFitCoeff <- RecovFits %>%
+  unnest(col = TidiedRecov, names_repair = "universal") %>%
+  select(-c(data, FitRecov, PredictRecov, ParamRecov))
+
+RecovPredictFrame <- RecovFits %>%
+  unnest(col = c(PredictRecov), names_repair = "universal") %>%
+  select(-c(data, FitRecov, TidiedRecov, ParamRecov))
+
+RecovPredictFrame
+```
+
+## Kok fixed fits of Lincomycin == 0 with inputs from Lincomycin == 1
+Use map to step through the nested data sets, but use the values of LincoKpi and LincoExpIntercept as inputs into the fitting equation at each step.
+
+Update the list of starting parameter values because now Kpi & Intercept are fixed to previously determined values as inputs, rather than floating.
+```{r  Kok fixed fits, warning = FALSE, message = FALSE}
+#new seed value to start fits
+KokFixStart <- list(Krec = 0.0005)
+
+#set upper and lower bounds for krec to constrain fits
+#Try running without, probably not necessary; risk is that fit hits lower or upper limit and does not report
+# KokFixLower <- c(Krec = 0.00005)
+# KokFixUpper <- c(Krec = 0.005)
+
+KokFixFits <- FixDataNest %>%
+  mutate(FitKok = map(data, ~nlsLM(FvFmmax ~ kok_eqn(x = Treatment_s, Krec, Kpi = estimate_Kpi, Intercept = estimate_Intercept), data = .x, start = KokFixStart))) %>%
+  mutate(TidiedKok = map(FitKok, tidy),
+         ParamKok = map(FitKok, glance),
+         PredictKok = map(FitKok, augment))
+
+KokFixSigmaIFits <- CourseDataNest %>%
+  mutate(FitKok = map(data, ~nlsLM(FvFmmax ~ koksigmaI_eqn(x = Treatment_s, Photons_m2_s = Photons_m2_s, Krec, SigmaI = SigmaI_m2, Intercept = estimate_Intercept), data = .x, start = KokFixStart))) %>%
+  mutate(TidiedKok = map(FitKok, tidy),
+         ParamKok = map(FitKok, glance),
+         PredictKok = map(FitKok, augment))
+
+#Earlier notes on earlier attempts
+#Works,  except for Map augment to get predicted values
+#Problem is only 3 rows of Kpi & Intercept, many rows of Treatment_s & FvFm, augment cannot get the proper rows of Kpi & Intercept to generate predictions.
+#To fix: either add LincoKpi & LincoIntercept & SigmaI_m2 to the dataframes for each species (unnest then renest? map?)
+#Or, use 'predict' to generate a simple prediction vector for each FitKok. 
+#Or, generate the plot using a geom_stat instead of a simple geom_line with the predicted values. But complicated equation to try to enter in geom_stat
+```
+
+Get KokFixFit Coefficients as dataframes
+```{r KokFixFitCoefficients}
+KokFixCoeff <- KokFixFits %>%
+  unnest(TidiedKok)
+
+KokFixSigmaICoeff <- KokFixSigmaIFits %>%
+  unnest(TidiedKok) %>%
+  pivot_wider(names_from = term, values_from = c(estimate, std.error, statistic, p.value))
+```
+
+Add krec from KokFixSigmaICoeff to FixTidyData
+```{r fixtidydata}
+FixTidyData <- left_join(x = FixTidyData, y = KokFixSigmaICoeff, by = "Species")
+```
+
+## Assemble Kok Fit Parameters to single dataframe
+```{r fit coefficients}
+FitCoeff <- left_join(x = FixKpi, y = KokFixSigmaICoeff, by = "Species") %>%
+  rename(Kpi = estimate_Kpi,
+         Intercept = estimate_Intercept,
+         Krec = estimate_Krec) %>%
+  mutate(SigmaI_m2 = Kpi/(TreatmentPAR_ue * Photons_umol),
+         std.error_SigmaI_m2 = std.error_Kpi/(TreatmentPAR_ue * Photons_umol)) %>%
+  select(Species, Kpi, Krec, std.error_Kpi, std.error_Krec, SigmaI_m2, std.error_SigmaI_m2, everything())
+
+FitCoeff
+
+FitCoeffTrim <- FitCoeff %>%
+  select(-c(data, FitKok, ParamKok, PredictKok))
+
+
+
+CoeffCaption = c("Rate Constants for Photosystem II Photoinactivation (Kpi (s^-1^)) and Repair (Krec (s^-1^))")
+FitCoeff2 <- FitCoeff %>%
+  select(1:5, 10, 18) %>%
+  mutate(n = c(4,4,3))
+
+#formatC does not seem to work inside a pipe
+FitCoeff2$Kpi <- formatC(FitCoeff$Kpi, digits = 2, format = "e")
+FitCoeff2$Krec <- formatC(FitCoeff$Krec, digits = 2,format = "e")
+FitCoeff2$std.error_Kpi <- formatC(FitCoeff$std.error_Kpi, digits = 2,format = "e")
+FitCoeff2$std.error_Krec <- formatC(FitCoeff$std.error_Krec, digits = 2,format = "e")
+FitCoeff2$statistic_Kpi <- formatC(FitCoeff$statistic_Kpi, digits = 2,format = "e")
+FitCoeff2$statistic_Krec <- formatC(FitCoeff$statistic_Krec, digits = 2,format = "e")
+FitCoeff2$statistic_Kpi <- formatC(FitCoeff$statistic_Kpi, digits = 2,format = "e")
+FitCoeff2$statistic_Krec <- formatC(FitCoeff$statistic_Krec, digits = 2,format = "e")
+
+
+kable(FitCoeff2, caption = CoeffCaption)
+```
+
+Get KokFixFit Predictions as dataframe.
+```{r KokFixFit Predictions}
+KokFixPredictFrame <- KokFixFits %>%
+  select(-c(FitKok, TidiedKok,ParamKok)) %>%
+  unnest(col = c(data, PredictKok), 
+           names_repair = "universal")  %>%
+  rename(Treatment_s = Treatment_s...53) %>%
+  mutate(Timecourse_min = Timecourse_sec/60)
+
+KokFixSigmaIPredictFrame <- KokFixSigmaIFits %>%
+  select(-c(FitKok, TidiedKok,ParamKok)) %>%
+  unnest(col = c(data, PredictKok), 
+           names_repair = "universal") %>%
+  rename(Treatment_s = Treatment_s...53) %>%
+  mutate(Timecourse_min = Timecourse_sec/60)
+
+# KokFixSigmaIKrecFrame <- KokFixSigmaIFits %>%
+#   select(-c(FitKok, PredictKok,ParamKok)) %>%
+#   unnest(col = c(data, TidiedKok),
+#            names_repair = "universal") %>%
+#   rename(Krec = estimate, Krec_SE = std.error) %>%
+#   select(-c(statistic, p.value,ResidualsKok)) %>%
+#   mutate(KokSigmaIKrecPredict = Inter_estimate * (Krec + ((SigmaI_m2 * Photons_m2_s) * exp(-(((SigmaI_m2 *Photons_m2_s) + Krec) * Timecourse_sec))))/((SigmaI_m2*Photons_m2_s) + Krec))
+
+```
+
+## Plot Kok fits of Data
+Overlap KokFixFit predictions on plot
+```{r FvFmTimeLincoKokFixModelPlot, warning = FALSE, message = FALSE}
+TidyData %>%
+  ggplot() +
+  geom_point(aes(x = Treatment_s, y = FvFmmax, colour = as.factor(Lincomycin))) +
+  geom_vline(xintercept = 120 * 60,linetype = "dashed") +
+  scale_colour_manual(values = my_colours) +
+  facet_grid(rows = vars(Species)) + 
+  labs(title = Project, subtitle = "Lincomycin (0, 1) Treatment", caption = "Species by row; Inhibitor Treatment by colour") +
+  theme_bw() +
+  geom_line(data = LincoPredictFrame, aes(x = Treatment_s, y = .fitted), colour = my_colours[2], linetype = "dashed") + 
+  geom_line(data = KokFixPredictFrame, aes(x = Treatment_s, y = .fitted), colour = my_colours[1]) 
+
+```
+The KokFixedFit predicted fit is quite similar to the KokFit, but the estimate for Krec is quite different, because we did not allow Kpi & intercept to float to different values from those taken from 'Lincomycin' = 1.
+
+Overlap KokFixSigamIFit predictions on plot
+This prediction takes SigmaI = Kpi/photons m-2 s-1 and recycles it to generate a PAR-specific Kpi = SigmaI * photons m-2 s-1 to be used in the Kok fit.
+Krec is optimized to account for the entire 1200 uE period and the 15 uE recovery period, Lincomycin == 0
+These plots show a good approximation to the entire data course data.
+The recovery rate is somewhat over-estimated for To, but good for Tp & Tw.
+```{r FvFmTimeLincoKokFixSigmaIModelPlot, warning = FALSE, message = FALSE}
+TidyData %>%
+  ggplot() +
+  geom_point(aes(x = Treatment_s, y = FvFmmax, colour = as.factor(Lincomycin), shape = as.factor(Lincomycin))) +
+  geom_vline(xintercept = 120 * 60,linetype = "dashed") +
+  scale_colour_manual(values = my_colours) +
+  geom_line(data = LincoPredictFrame, aes(x = Treatment_s, y = .fitted), colour = my_colours[2], linetype = "dashed") + 
+  geom_line(data = KokFixSigmaIPredictFrame, aes(x = Treatment_s, y = .fitted ), colour = my_colours[1]) +
+  labs(y = expression(F[V]/F[M])) +
+  facet_grid(rows = vars(Species)) +
+  theme_bw() +
+  annotate("text", x = 4000, y = 0.55,label = c("1200 μE"), size = 3) +
+  annotate("text", x = 10000, y = 0.35,label = c("15 μE"), size = 3)
+
+```
+```{r labelling setup}
+LincomycinNames <- c(
+  '0' = "No Lincomycin", 
+  '1' = "Lincomycin")
+
+Annotations <- data.frame(x = c(25,150), y = c(0.66, 0.66), label = c("1200 μE", "15 μE"))
+Annotations2 <- data.frame(x = c(-8, 25,150), y = c(0.66, 0.66, 0.66), label = c("80", "1200 μE", "15 μE"))
+Annotations3 <- data.frame(x = c(-8, 25,150), y = c(110,110,110), label = c("80", "1200 μE", "15 μE"))
+
+```
+
+Overlap fits with FvFmmin, FvFmmax and relaxation points
+```{r FvFmmaxminTimecourse_secLincoSpeciesRelaxwithFits}
+FvFmmaxminTimecourseLincoSpeciesRelaxPlot <- TidyData %>%
+  filter(Lincomycin == 0,
+         Replicate == 3) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = FvFmmax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = FvFmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FvFmFqFm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  geom_line(data = LincoPredictFrame, aes(x = Treatmentmin, y = .fitted), colour = my_colours[2], linetype = "dotted") +
+  #geom_line(data = KokFixSigmaIPredictFrame, aes(x = Treatmentmin, y = .fitted), colour = my_colours[1]) +
+  coord_cartesian(xlim = c(0, 180)) +
+  annotate("rect", xmin = c(0), xmax = c(120), ymin = c(0.61), ymax = c(0.7,0.7), color= c("black"), fill = c("white")) +
+   annotate("rect", xmin = c(120), xmax = c(180), ymin = c(0.61), ymax = c(0.7), color= c("black"), fill = c("grey")) +
+  geom_text(data = Annotations, aes(x = x, y = y, label = label)) +
+  facet_grid(rows = vars(Species)) + 
+  labs(x = "Elapsed Time (min)", y = expression(F[V]/F[M]), size = 5) +
+  # annotate("text", x = 75, y = 0.55,label = c("1200 μE"), size = 5) +
+  # annotate("text", x = 175, y = 0.35,label = c("15 μE"), size = 5) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), panel.background = element_blank(), strip.background = element_blank(),
+  strip.text.x = element_blank())
+
+#exp_eqn_test <- function(x, Kpi = 0.0005, Intercept = 0.7){(Intercept*exp(x*-Kpi))
+# }
+# ggplot(data.frame(x=c(1, 2000)), aes(x=x)) + 
+#   stat_function(fun=exp_eqn_test)
+
+#if more than one nm in Fitvar
+# MuStart = (log(max(FitData[FitData$Wavelength == nm, Fitvar], na.rm = TRUE)) - log(min(FitData[FitData$Wavelength == nm, Fitvar], na.rm = TRUE)))/max(FitData$E_hours)
+
+#+
+ # scale_colour_manual(values = my_colours) +
+FvFmmaxminTimecourseLincoSpeciesRelaxPlot
+
+#Build up with grid to have individual panel annotations
+FvFmmaxminTimecourseLincoToRelaxPlot <- TidyData %>%
+  filter(Lincomycin == 0,
+         Replicate == 3,
+         Species == "To") %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = FvFmmax), colour = my_colours[1]) +
+  geom_line(aes(x = Treatmentmin, y = FvFmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FvFmFqFm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  geom_line(data = LincoPredictFrame %>% filter(Species == "To"), aes(x = Treatmentmin, y = .fitted), colour = my_colours[2], linetype = "dotted") +
+  coord_cartesian(xlim = c(0, 180), ylim = c(0,0.7)) +
+  annotate("rect", xmin = c(0), xmax = c(120), ymin = c(0.61), ymax = c(0.7,0.7), color= c("black"), fill = c("white")) +
+   annotate("rect", xmin = c(120), xmax = c(180), ymin = c(0.61), ymax = c(0.7), color= c("black"), fill = c("grey")) +
+  geom_text(data = Annotations, aes(x = x, y = y, label = label)) +
+  labs(x = NULL, y = expression(F[V]/F[M]*" or "*F[V]*"'"*"/"*F[M]*"'"), size = 5) +
+  annotate("text", x = 175, y = 0.35,label = c("To"), size = 5) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), panel.background = element_blank(), strip.background = element_blank(),
+  strip.text.x = element_blank(), axis.title.x=element_blank(),
+        axis.text.x=element_blank(), aspect.ratio = 0.33,plot.margin = margin(0.1,0.1,0,0.1, "cm"))
+
+FvFmmaxminTimecourseLincoToRelaxPlot
+
+FvFmmaxminTimecourseLincoTpRelaxPlot <- TidyData %>%
+  filter(Lincomycin == 0,
+         Replicate == 3,
+         Species == "Tp") %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = FvFmmax), colour = my_colours[1]) +
+  geom_line(aes(x = Treatmentmin, y = FvFmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FvFmFqFm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  geom_line(data = LincoPredictFrame %>% filter(Species == "Tp"), aes(x = Treatmentmin, y = .fitted), colour = my_colours[2], linetype = "dotted") +
+  coord_cartesian(xlim = c(0, 180), ylim = c(0,0.7)) +
+  labs(x = NULL, y = expression(F[V]/F[M]*" or "*F[V]*"'"*"/"*F[M]*"'"), size = 5) +
+  annotate("text", x = 175, y = 0.35,label = c("Tp"), size = 5) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), panel.background = element_blank(), strip.background = element_blank(),
+  strip.text.x = element_blank(),axis.title.x=element_blank(),
+        axis.text.x=element_blank(), aspect.ratio = 0.33, plot.margin = margin(-0.1,0.1,0,0.1, "cm"))
+
+FvFmmaxminTimecourseLincoTpRelaxPlot
+
+FvFmmaxminTimecourseLincoTwRelaxPlot <- TidyData %>%
+  filter(Lincomycin == 0,
+         Replicate == 3,
+         Species == "Tw") %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = FvFmmax), colour = my_colours[1]) +
+  geom_line(aes(x = Treatmentmin, y = FvFmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FvFmFqFm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  geom_line(data = LincoPredictFrame %>% filter(Species == "Tw"), aes(x = Treatmentmin, y = .fitted), colour = my_colours[2], linetype = "dotted") +
+  coord_cartesian(xlim = c(0, 180), ylim = c(0,0.7)) +
+  labs(x = "Elapsed Time (min)", y = expression(F[V]/F[M]*" or "*F[V]*"'"*"/"*F[M]*"'"), size = 5) +
+  annotate("text", x = 175, y = 0.35,label = c("Tw"), size = 5) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), panel.background = element_blank(), strip.background = element_blank(),
+  strip.text.x = element_blank(), aspect.ratio = 0.33,plot.margin = margin(0,0.1,0.1,0.1, "cm"))
+
+FvFmmaxminTimecourseLincoTwRelaxPlot
+
+FvFmmaxminTimecourseLincoToTpTwRelaxPlot <- ggarrange(FvFmmaxminTimecourseLincoToRelaxPlot, FvFmmaxminTimecourseLincoTpRelaxPlot, FvFmmaxminTimecourseLincoTwRelaxPlot, ncol = 1, nrow = 3, align = "h")
+
+FvFmmaxminTimecourseLincoToTpTwRelaxPlot
+```
+Overview TimeCourse plot of Fomin, Fomax, Fmmin, Fmmax, Sigmamin, Sigmamax, taumin, taumax and relaxation points
+
+Fix placement of points relative to timecourse; define new variables.
+```{r FoFmSigmataumaxminRelax}
+#F[O]*"',"F[M]*","*F[M]*"',"
+
+#y = expression(F[V]/F[M]*" or "*F[V]*"'"*"/"*F[M]*"'"), size = 5)
+
+FomaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = Fomax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = Fomin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FoF), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  labs(x = NULL, y = expression(F[O]*", "*F[O]*"'"), size = 5) +
+   annotate("rect", xmin = c(-15), xmax = c(0), ymin = c(98), ymax = c(122), color= c("black"), fill = c("lightgrey")) +
+  annotate("rect", xmin = c(0), xmax = c(120), ymin = c(98), ymax = c(122), color= c("black"), fill = c("white")) +
+   annotate("rect", xmin = c(120), xmax = c(180), ymin = c(98), ymax = c(122), color= c("black"), fill = c("grey")) +
+  geom_text(data = Annotations3, aes(x = x, y = y, label = label)) +
+  coord_cartesian(xlim = c(-10, 180), ylim = c(0, 160)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+FomaxminRelax
+
+FmmaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = Fmmax), colour = "darkgreen") +
+  geom_line(aes(x = Timecourse_min, y = Fmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = Fm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  labs(x = NULL, y = expression(F[M]*", "*F[M]*"'"), size = 5) +
+  coord_cartesian(xlim = c(-10, 180), ylim = c(0, 160)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+FmmaxminRelax
+
+SigmamaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  
+  geom_line(aes(x = Timecourse_minMAX, y = Sigmamax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = Sigmamin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = Sigma), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  #facet_grid(cols = vars(Lincomycin)) + 
+  labs(x = NULL, y = expression(paste(σ[PSII],", ", σ[PSII],"' (", nm^2, ")")), size = 5) +
+  coord_cartesian(xlim = c(-10, 180), ylim = c(0,3.6)) +
+  theme_bw()+
+  theme(axis.text = element_text(size = 10), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+# geom_line(aes(x = Timecourse_min, y = Sigmamax), colour = "darkgreen") +
+#   geom_line(aes(x = Timecourse_min, y = Sigmamin),linetype = "dashed", colour = "orange") +
+#   geom_point(aes(x = Timecourse_min, y = Sigma), size = 0.2) +
+#   
+SigmamaxminRelax
+
+TaumaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = Taumax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = Taumin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = Tau), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  labs(x = NULL, y = "τ, τ' (µs) ", size = 5) +
+  coord_cartesian(xlim = c(-10, 180)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+TaumaxminRelax
+
+
+PSIIETRYmaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = PSIIETRYrelaxed), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = PSIIETRYinduced),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = PSIIETRY), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  labs(x = "Elapsed Time (min)", y = expression(paste("e- ", PSII^-1," ",  s^-1), size = 5)) +
+  coord_cartesian(xlim = c(-10, 180)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), panel.background = element_blank(),strip.background = element_blank(),
+  strip.text.x = element_blank())
+
+PSIIETRYmaxminRelax
+
+     # labs(x = "Elapsed Time (min)", y = bquote('σPSII (nm'^2*')'), size = 5) +
+     #  xlab(bquote('Assimilation ('*mu~ 'mol' ~CO[2]~ m^-2~s^-1*')'))
+
+FoFmSigmataumaxminRelax <- ggarrange(FomaxminRelax,FmmaxminRelax,SigmamaxminRelax,TaumaxminRelax,PSIIETRYmaxminRelax, ncol = 1, nrow = 5, heights = c(1,1,1,1,1.5),labels = "AUTO", hjust = -48, align = c("v"))
+
+FoFmSigmataumaxminRelax
+```
+
+
+Overview TimeCourse plot of YNPQ min, YNPQmax, FvFmmin, FvFmmax, Sigmamin, Sigmamax, PSIIETRYmin, PSIIETRYmax and relaxation points
+```{r FvFmSigmamaxminRelax}
+
+YNPQmaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = YNPQrelaxed), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = YNPQinduced),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = YNPQ), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  labs(x = NULL, y = "YNPQ", size = 5) +
+   annotate("rect", xmin = c(-15), xmax = c(0), ymin = c(0.62), ymax = c(0.7,0.7), color= c("black"), fill = c("lightgrey")) +
+  annotate("rect", xmin = c(0), xmax = c(120), ymin = c(0.62), ymax = c(0.7,0.7), color= c("black"), fill = c("white")) +
+   annotate("rect", xmin = c(120), xmax = c(180), ymin = c(0.62), ymax = c(0.7), color= c("black"), fill = c("grey")) +
+  geom_text(data = Annotations2, aes(x = x, y = y, label = label)) +
+  coord_cartesian(xlim = c(-10, 180)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+YNPQmaxminRelax
+
+FvFmmaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = FvFmmax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = FvFmmin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = FvFmFqFm), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  labs(x = NULL, y = expression(F[V]/F[M]*" or "*F[V]*"'"*"/"*F[M]*"'"), size = 5) +
+  coord_cartesian(xlim = c(-10, 180), ylim = c(0, 0.7)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+FvFmmaxminRelax
+
+
+SigmamaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = Sigmamax), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = Sigmamin),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = Sigma), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  #facet_grid(cols = vars(Lincomycin)) + 
+  labs(x = NULL, y = expression(paste(σ[PSII]," or ", σ[PSII],"' (", nm^2, ")")), size = 5) +
+  coord_cartesian(xlim = c(-10, 180), ylim = c(0,3.6)) +
+  theme_bw()+
+  theme(axis.text = element_text(size = 10), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+SigmamaxminRelax
+
+
+PSIIETRYmaxminRelax <- TidyData %>%
+  filter(Replicate == 3,
+         Species == "Tw",
+         Lincomycin == 0) %>%
+  ggplot() +
+  geom_line(aes(x = Timecourse_minMAX, y = PSIIETRYrelaxed), colour = "darkgreen") +
+  geom_line(aes(x = Treatmentmin, y = PSIIETRYinduced),linetype = "dashed", colour = "orange") +
+  geom_point(aes(x = Timecourse_min, y = PSIIETRY), size = 0.2) +
+  geom_vline(aes(xintercept = 120), linetype = "dotted") +
+  labs(x = "Elapsed Time (min)", y = expression(paste("e- ", PSII^-1," ",  s^-1), size = 5)) +
+  coord_cartesian(xlim = c(-10, 180)) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), panel.background = element_blank(),strip.background = element_blank(),
+  strip.text.x = element_blank())
+
+PSIIETRYmaxminRelax
+
+     # labs(x = "Elapsed Time (min)", y = bquote('σPSII (nm'^2*')'), size = 5) +
+     #  xlab(bquote('Assimilation ('*mu~ 'mol' ~CO[2]~ m^-2~s^-1*')'))
+
+FvFmSigmaPSIIETRmaxminRelax <- ggarrange(YNPQmaxminRelax, FvFmmaxminRelax,  SigmamaxminRelax,PSIIETRYmaxminRelax, ncol = 1, nrow = 4, heights = c(1,1,1,1.5), labels = "AUTO", hjust = -48, align = c("v"))
+
+FvFmSigmaPSIIETRmaxminRelax
+```
+
+
+
+
+```{r save plots, include = FALSE}
+
+ggsave(plot = FvFmSigmaPSIIETRmaxminRelax, filename = file.path(Plots,paste(Project, "FvFmSigmaPSIIETRmaxminRelax", ".png",sep = ""), fsep = .Platform$file.sep))
+
+ggsave(plot = FoFmSigmataumaxminRelax, filename = file.path(Plots,paste(Project, "FoFmSigmataumaxminRelax", ".png",sep = ""), fsep = .Platform$file.sep))
+
+```
+Look in the 'Plots' folder to see the resulting .png, .pdf and .Rds objects.

@@ -1,0 +1,76 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2639
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 Menlo-Regular;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;}
+\margl1440\margr1440\vieww15800\viewh16260\viewkind0
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs36 \cf0 \expnd0\expndtw0\kerning0
+Hi Nerissa;\
+Not sure if you prefer a series of short emails, or one big summary, but very first thoughts:\
+\
+i) In your spreadsheet you use a single phase exponential decay, in the presence of lincomycin, over each time window, to estimate time resolved estimates of the rate constant for photoinactivation.\
+\
+In the literature (Kok 1956 etc.) this would be termed kpi.\
+But by fitting a separate rate for each time window you are assuming that the tangent slope for each time window would continue to a Y axis of 0.\
+In fact if you fit all the points over the entire decay (0 - 120) you would get an overall estimate of the single phase decay rate.\
+\
+You can also consider that once [PSIIactive] = 0 you would probably still have a residual level of FVFM, so a decay to FVFM = 0 may not be valid and it might be better to fit a decay to a plateau higher than 0.\
+The plateau could be left to float as a fit parameter, or it could be set as a measured plateau of the lower bound to which FVFM drops.\
+\
+ii) You could recast your photoinactivation data by plotting FVFM vs. cumulative incident photons.\
+This would allow you to use all your data points across the treatment trajectory, in the presence of lincomycin, because photoinactivation doe not 'stop' in your recovery period, it just slows way down.\
+On the basis of incident photons it probably continues at a yield (per photon) about the same as under the preceding high light.\
+If the recovery points are in darkness this is not useful.\
+A fit of FVFM vs. cumulative incident photons gives a parameter with units of m2 photons, which we term sigma i, the effective absorbtion cross section for photoinactivation. It is directly comparable to sigmaPSII, and is usually ~~1/1000,000 the size of sigmaPSII (using equivalent units for each, of A2 photon-2, or nm2 photon or m2 photon).\
+\
+iii) Your Repair Rate RR[E] parameter is an empirical estimate that I used in the Key et al. 2010 paper.\
+1. Key T, Mccarthy A, Campbell D, Six C, Roy S, Finkel Z. Cell size trade-offs govern light exploitation strategies in marine phytoplankton. Environ Microbiol. 2010;12: 95\'96104. doi:10.1111/j.1462-2920.2009.02046.x\
+\
+It is, arithmetically, the difference between two exponential rates.\
+It has no direct connection to an underlying mechanistic process, and the measured difference is influenced by both repair capacity and by the rate of photoinactivation under a given treatment.\
+So, run the same cells under a different light level, you get a different measure of the difference.\
+This is unsatisfying and not generalizable.\
+I was roundly criticized for using it in the 2010 paper and have since moved on.\
+\
+iv) You have sigmaPSII.\
+So estimating sigma i could be highly informative.\
+1. Murphy CD, Roodvoets MS, Austen EJ, Dolan A, Barnett A, Campbell DA. Photoinactivation of Photosystem II in Prochlorococcus and Synechococcus. Subramanyam R, editor. PLOS ONE. 2017;12: e0168991. doi:10.1371/journal.pone.0168991\
+\
+v) Looking at your graphs of T. oceanica, T. pseudonana & T. weiss:\
+-the photoinactivation period could be fit with the simple Kok 1956 model (outlined in the previously sent book chapter) for simultaneous estimation of kpi & krec.\
+	Estimate kpi from the your + lincomycin data.\
+	Use that kpi as an input into the fitting of the - lincomycin data, assuming that the difference between +/- lincomycin is the absence/presence of the rate constant for repair, krec.\
+\
+-you have an apparent recovery in the presence of lincomycin in T. weiss.\
+What my group has in past done is assumed this represents relaxation of sustained NPQ and subtracted the amplitude of that increase from the decrease observed under high light, to rougly separated the influence of photoinactivation from the incluence of induction of sustained NPQ.\
+With Dany Croteau (separate email to follow) I have discussed a more sophisticated approach of modelling photoinactivation and NPQ as separate but overlapping processings with separate rate constants and amplitudes.\
+\
+-Except for T. weiss (complexity of overlapping NPQs) you can also model krec as the exponential decay of the difference between a fully recovered maximum plateau and the instantaneous PSIIactive during the recovery period.\
+\
+During recovery, (assuming negligible continuing photoinactivation during recovery)\
+FVFMt = \{FVFMmax - FVFMt\} * e^-krec*t\
+\
+In this case the gap between FVFMt and FVFMmax is decaying exponentially under the influence of krec.\
+The only question is, what to take as FVFMmax.\
+If you leave it as a fitted parameter, you have 2 unknowns and only 3 data points during recovery.\
+If you set it to the maximum measured FVFM during your time course you assume that recovery ends at the end of your measurement period.\
+If you set it to some hypothetical perfect FVFM for diatoms (say 0.65) you assume that if you continued your recovery long enough the cultures would get to a 'true' maximum).\
+\
+No perfect answers.\
+\
+For T. weiss you can use this same approach, just subtract the amplitude of the +lincomycin recovery from the -lincomycin recover to leave the component attributable to protein dependent PSII repair.\
+\
+Now I am teetering into my next email to Dany.\
+\
+Also: I published many many papers hacking out these fits in Excel as you are doing.\
+But I strongly advise you climb the learning curve to do this work in R or Python or even MatLab.\
+As you start to automate these processes (ex. well plate treatments) you will not keep up hacking together cells in Excel.\
+\
+If you are doing your measurements in an FRRf (I think so) I am accumulating R packages & scripts to do these fits.\
+\
+Douglas A. Campbell\
+CRC in Phytoplankton Ecophysiology\
+Mount Allison University\
+Sackville NB}
